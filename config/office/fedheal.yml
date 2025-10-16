@@ -1,0 +1,16 @@
+algo_para: 0.2
+batch_size: 50
+clip_grad: 10
+learning_rate: 0.1
+learning_rate_decay: 0.9998
+local_test: true
+log_file: true
+lr_scheduler: 0
+no_log_console: true
+no_tqdm: true
+num_epochs: 1
+num_rounds: 500
+proportion: 1.0
+sample: full
+train_holdout: 0.2
+weight_decay: 1e-3
