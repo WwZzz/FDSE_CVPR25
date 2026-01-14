@@ -1,4 +1,4 @@
-# FDSE_CVPR25
+# FDSE: Federated Learning with Domain Shift Eraser
 (CVPR2025) The implementation of the paper 'Federated Learning with Domain Shift Eraser'. 
 <img width="1032" height="734" alt="image" src="https://github.com/user-attachments/assets/11174369-5233-4731-a8ef-5eacda8f684e" />
 
