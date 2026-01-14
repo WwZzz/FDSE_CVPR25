@@ -12,56 +12,91 @@ import math
 
 
 class DSEConv(nn.Module):
-
-    def __init__(self, inp, oup, kernel_size=1, ratio=2, dw_size=3, stride=1, relu=True):
+    def __init__(self, inp, oup, kernel_size=1, ratio=2, dw_size=3, stride=1, padding=0, use_relu=True, bias=True, use_dse_activate=False, use_dse_bn=True, shortcut=True):
         super(DSEConv, self).__init__()
         self.oup = oup
-        init_channels = math.ceil(oup / ratio)
-        new_channels = init_channels * (ratio - 1)
-        self.Vshare = nn.Conv2d(inp, init_channels, kernel_size, stride, kernel_size // 2, bias=True)
-        self.norm_V = nn.BatchNorm2d(init_channels)
+        self.use_relu = use_relu
+        self.use_dse_activate = use_dse_activate
+        self.use_dse_bn = use_dse_bn
+        self.ratio = ratio
+        self.shortcut = shortcut
+        if shortcut:
+            init_channels = math.ceil(oup / ratio) if ratio>1 else oup
+            new_channels = init_channels * (ratio - 1) if ratio>1 else oup
+        else:
+            init_channels = math.ceil(oup / ratio) if ratio>1 else oup
+            new_channels = oup
+        self.dfe_conv = nn.Conv2d(inp, init_channels, kernel_size, stride, padding, bias=True)
+        self.dse_bn = nn.BatchNorm2d(init_channels)
+        self.dfe_bias = nn.Parameter(torch.zeros(oup)) if bias else None
+        self.dse_conv = nn.Conv2d(init_channels, new_channels, dw_size, 1, dw_size // 2, groups=init_channels, bias=False)
+        self.dfe_bn = nn.BatchNorm2d(oup)
         self.relu = nn.ReLU(inplace=True)
-        self.Up = nn.Conv2d(init_channels, new_channels, dw_size, 1, dw_size // 2, groups=init_channels, bias=False)
-        self.Vbias = nn.Parameter(torch.zeros(oup))
-        self.bn = nn.BatchNorm2d(oup)
+        self.leakyrelu = nn.LeakyReLU(negative_slope=0.01)
 
     def forward(self, x):
-        x1 = self.relu(self.norm_V(self.Vshare(x)))
-        x2 = self.Up(x1)
-        out = torch.cat([x1, x2], dim=1)
-        # return out[:, :self.oup, :, :]
-        out = out[:, :self.oup, :, :] + self.Vbias.expand(out.shape[0], self.Vbias.shape[0]).reshape(out.shape[0], self.Vbias.shape[0], 1, 1)
-        return self.relu(self.bn(out))
+        x1 = self.dfe_conv(x)
+        if self.use_dse_bn: x1 = self.dse_bn(x1)
+        if self.use_dse_activate: x1 = self.leakyrelu(x1)
+        if self.shortcut:
+            x2 = self.dse_conv(x1)
+            x = torch.cat([x1, x2], dim=1) if self.ratio>1 else x2+x1
+        else:
+            x = self.dse_conv(x1)
+        if self.dfe_bias is not None:
+            x = x[:, :self.oup, :, :] + self.dfe_bias.expand(x.shape[0], self.dfe_bias.shape[0]).reshape(x.shape[0], self.dfe_bias.shape[0], 1, 1)
+        x = self.dfe_bn(x)
+        if self.use_relu: x = self.relu(x)
+        return x
 
 class DSELinear(nn.Module):
-    def __init__(self, inp, oup, ratio=2, relu=True):
+    def __init__(self, inp, oup, ratio=2, dw_size=1, use_relu=True, use_dse_activate=False, use_dse_bn=True, shortcut=True):
         super().__init__()
-        init_channels = math.ceil(oup / ratio)
-        new_channels = oup
+        # init_channels = math.ceil(oup / ratio) if ratio>1 else oup
+        # new_channels = oup
+        self.ratio = ratio
+        self.shortcut = shortcut
+        if shortcut:
+            init_channels = math.ceil(oup / ratio) if ratio>1 else oup
+            new_channels = init_channels * (ratio - 1) if ratio>1 else oup
+        else:
+            init_channels = math.ceil(oup / ratio) if ratio>1 else oup
+            new_channels = oup
+        self.use_relu = use_relu
+        self.use_dse_activate = use_dse_activate
+        self.use_dse_bn = use_dse_bn
         # self.Vshare = nn.Linear(inp, init_channels)
-        self.Vshare = nn.Conv2d(inp, init_channels, 1, bias=True)
-        self.norm_V = nn.BatchNorm2d(init_channels)
+        self.dfe_conv = nn.Conv2d(inp, init_channels, 1, bias=True)
+        self.dse_bn = nn.BatchNorm2d(init_channels)
         self.relu = nn.ReLU(inplace=True)
-        self.Up = nn.Conv2d(init_channels, new_channels, 1, groups=init_channels, bias=False)
-        self.Vbias = nn.Parameter(torch.zeros(oup))
-        self.bn = nn.BatchNorm1d(oup)
+        self.dse_conv = nn.Conv2d(init_channels, new_channels, dw_size, 1, dw_size // 2, groups=init_channels, bias=False)
+        self.dfe_bias = nn.Parameter(torch.zeros(oup))
+        self.dfe_bn = nn.BatchNorm1d(oup)
+        self.leakyrelu = nn.LeakyReLU(negative_slope=0.01)
         # self.Up = nn.Linear(init_channels, new_channels)
 
     def forward(self, x):
         x = x.unsqueeze(-1).unsqueeze(-1)
-        x1 = self.relu(self.norm_V(self.Vshare(x)))
-        x2 = self.Up(x1)
-        x3 = x2.squeeze(-1).squeeze(-1)
-        out = self.bn(x3 + self.Vbias)
-        return self.relu(out)
+        x1 = self.dfe_conv(x)
+        if self.use_dse_bn:x1 = self.dse_bn(x1)
+        if self.use_dse_activate: x1 = self.leakyrelu(x1)
+        if self.shortcut:
+            x2 = self.dse_conv(x1)
+            x = torch.cat([x1, x2], dim=1) if self.ratio>1 else x2+x1
+        else:
+            x = self.dse_conv(x1)
+        x = x.squeeze(-1).squeeze(-1)
+        x = self.dfe_bn(x + self.dfe_bias)
+        if self.use_relu: x = self.relu(x)
+        return x
 
 class Server(fedavg.Server):
     def initialize(self, *args, **kwargs):
         # initialize user embedding for all clients
-        self.init_algo_para({'lmbd': 10.0, 'beta':0.5, 'tau': 10.0,})
+        self.init_algo_para({'lmbd': 0.01, 'tau':0.5,'beta':0.1,})
         self.model = self.model.__class__()
-        shared_names = ['Vshare', 'bn', 'head', ]
-        local_names = ['norm_V.running_', ]
+        shared_names = ['dfe','head',]
+        local_names = ['dse_bn.running_']
         self.shared_weight_keys = [k for k in self.model.state_dict() if any([(s in k) for s in shared_names])]
         self.local_keys = [k for k in self.model.state_dict() if
                            any([(s in k) for s in local_names]) and k not in self.shared_weight_keys]
@@ -172,7 +207,7 @@ class Client(fedavg.Client):
         self.model = copy.deepcopy(self.server.model)
         self.bnlayers = list(dict.fromkeys(
             ["".join([f'[{m}]' if m.isdigit() else f'.{m}' for m in k.split('.')[:-1]]) for k in
-             self.model.state_dict().keys() if 'bn' in k]))
+             self.model.state_dict().keys() if 'dfe_bn' in k]))
 
     def unpack(self, received_pkg):
         self.model.load_state_dict(received_pkg['md'], strict=False)
@@ -198,16 +233,16 @@ class Client(fedavg.Client):
         weights = np.exp(np.array([self.beta*i for i in range(len(layers))]))
         weights/=weights.sum()
         feature_maps = []
-
         def hook(model, input, output):
             feature_maps.append(
                 input[0].mean(dim=0).mean(dim=-1).mean(dim=-1) if len(input[0].shape) > 3 else input[0].mean(dim=0))
-
         lhooks = []
         for l in layers:
             lh = l.register_forward_hook(hook)
             lhooks.append(lh)
         optimizer = self.calculator.get_optimizer(model, lr=self.learning_rate, weight_decay=self.weight_decay, momentum=self.momentum)
+        fn = None
+        vn = None
         for iter in range(self.num_steps):
             # get a batch of data
             batch_data = self.get_batch_data()
@@ -215,22 +250,24 @@ class Client(fedavg.Client):
             # calculate the loss of the model on batched dataset through task-specified calculator
             loss = self.calculator.compute_loss(model, batch_data)['loss']
             loss_reg = 0.
-            if self.server.current_round > 1:
+            if self.server.current_round > 1 and self.lmbd>0.:
                 loss_mean = 0.
                 loss_var = 0.
                 for g, w, f, v, ln in zip(global_means, weights, feature_maps, global_vars, layers):
                     mf = f.mean(dim=0)
                     vf = f.var(dim=0)
-                    fn = (1. - ln.momentum) * ln.running_mean + ln.momentum * mf
-                    vn = (1.- ln.momentum) * ln.running_var + ln.momentum * vf
-                    loss_mean += w*((g - fn).pow(2)).mean()
-                    loss_var += w*((v.mean() - vn.mean()).pow(2))
+                    fn = (1. - ln.momentum) * fn + ln.momentum * mf if fn is not None else mf
+                    vn = (1.- ln.momentum) * vn + ln.momentum * vf if vn is not None else vf
+                    loss_mean += w*((g.pow(2) - fn.pow(2))/(2*vn)).mean()
+                    loss_var += w*0.5*((torch.log(vn/(v+1e-8))+v/(vn+1e-8)).mean())
                 loss_reg += (loss_mean + loss_var)
                 loss += self.lmbd*loss_reg
             loss.backward()
             if self.clip_grad > 0: torch.nn.utils.clip_grad_norm_(parameters=model.parameters(), max_norm=self.clip_grad)
             optimizer.step()
             feature_maps.clear()
+            if fn is not None: fn = fn.detach()
+            if vn is not None: vn = vn.detach()
         for lh in lhooks:
             lh.remove()
         return
@@ -245,9 +282,9 @@ class AlexNetEncoder(nn.Module):
         super(AlexNetEncoder, self).__init__()
         self.features = nn.Sequential(
             OrderedDict([
-                ('conv1', DSEConv(3, 64, kernel_size=11, stride=4)),
+                ('conv1', DSEConv(3, 64, kernel_size=11, stride=4, padding=2)),
                 ('maxpool1', nn.MaxPool2d(kernel_size=3, stride=2)),
-                ('conv2', DSEConv(64, 192, kernel_size=5)),
+                ('conv2', DSEConv(64, 192, kernel_size=5, padding=2)),
                 ('maxpool2', nn.MaxPool2d(kernel_size=3, stride=2)),
                 ('conv3', DSEConv(192, 384, kernel_size=3)),
                 ('conv4', DSEConv(384, 256, kernel_size=3)),
